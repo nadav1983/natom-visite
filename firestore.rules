@@ -1,0 +1,68 @@
+rules_version = '2';
+// Natom Visite - regole di sicurezza Firestore
+// Solo gli utenti APPROVATI possono leggere/modificare il database negozi.
+// Solo gli ADMIN possono approvare/rifiutare/revocare utenti e cambiare ruoli.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function bootstrapAdmin() {
+      // Primo admin: Nadav, solo con email verificata
+      return signedIn()
+        && request.auth.token.email == 'nadavabramovraffael@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+    function me() { return get(/databases/$(database)/documents/users/$(request.auth.uid)).data; }
+    function hasProfile() { return signedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)); }
+    function approved() { return hasProfile() && me().stato == 'approvato'; }
+    function isAdmin() { return bootstrapAdmin() || (approved() && me().ruolo == 'admin'); }
+    function onlyChanged(keys) {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys);
+    }
+
+    // ---- Profili utente ----
+    match /users/{uid} {
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+
+      // Registrazione: sempre "in_attesa" / "venditore" (tranne il primo admin)
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.nome is string && request.resource.data.nome.size() > 0
+        && request.resource.data.telefono is string
+        && (
+          (request.resource.data.stato == 'in_attesa' && request.resource.data.ruolo == 'venditore')
+          || (bootstrapAdmin() && request.resource.data.stato == 'approvato' && request.resource.data.ruolo == 'admin')
+        );
+
+      // L'utente puo' cambiare solo nome/telefono; l'admin tutto (stato, ruolo)
+      allow update: if isAdmin()
+        || (signedIn() && request.auth.uid == uid && onlyChanged(['nome', 'telefono']))
+        // il primo admin puo' auto-promuoversi se il suo profilo esiste gia'
+        || (bootstrapAdmin() && request.auth.uid == uid);
+      allow delete: if isAdmin();
+    }
+
+    // ---- Database negozi (condiviso) ----
+    match /shops/{shopId} {
+      allow read: if approved() || isAdmin();
+      allow create, update: if (approved() || isAdmin())
+        && request.resource.data.modificato_uid == request.auth.uid;
+      allow delete: if isAdmin();
+
+      // Storico modifiche: solo aggiunta, mai modifica/cancellazione
+      match /history/{hId} {
+        allow read: if approved() || isAdmin();
+        allow create: if (approved() || isAdmin()) && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // ---- Configurazione (versione dataset) ----
+    match /config/{docId} {
+      allow read: if approved() || isAdmin();
+      allow write: if isAdmin();
+    }
+
+    match /{document=**} { allow read, write: if false; }
+  }
+}

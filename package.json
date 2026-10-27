@@ -1,0 +1,28 @@
+{
+  "name": "natom-visite",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/make-sw.mjs",
+    "build:emu": "VITE_EMULATOR=1 vite build && node scripts/make-sw.mjs",
+    "emulators": "firebase emulators:start --project demo-natom --only auth,firestore,hosting"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "@capacitor/filesystem": "^6.0.3",
+    "@capacitor/ios": "^6.2.2",
+    "@capacitor/share": "^6.0.3",
+    "firebase": "^11.10.0",
+    "xlsx": "^0.18.5",
+    "xlsx-js-style": "^1.2.0"
+  },
+  "devDependencies": {
+    "firebase-tools": "^15.34.1",
+    "puppeteer-core": "^24.43.1",
+    "vite": "^5.4.0"
+  }
+}

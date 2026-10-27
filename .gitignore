@@ -1,0 +1,45 @@
+# dipendenze e build
+node_modules/
+dist/
+*.log
+.DS_Store
+.firebase/
+
+# Android / iOS: output di build e copie della web app (contengono base.json)
+android/app/build/
+android/build/
+android/.gradle/
+android/local.properties
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+ios/App/Pods/
+ios/App/App/public/
+ios/App/App/capacitor.config.json
+ios/App/App/config.xml
+ios/build/
+ios/DerivedData/
+*.apk
+*.aab
+*.ipa
+
+# DATI LEAD: non pubblicare mai
+public/base.json
+data/
+*.xlsx
+*.xls
+*.csv
+screenshots/
+tests/export_*.xlsx
+
+# segreti
+*.p8
+*.p12
+*.mobileprovision
+*.keystore
+*.jks
+service-account*.json
+*-credentials*.json
+.env
+.env.*
+config.json

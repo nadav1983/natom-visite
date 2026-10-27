@@ -1,0 +1,13 @@
+import puppeteer from 'puppeteer-core';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const b = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: 'new', protocolTimeout: 600000, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+const p = await b.newPage(); await p.setViewport({ width: 400, height: 850, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+await p.goto('http://localhost:5000/', { waitUntil: 'networkidle2' });
+await p.waitForSelector('[name=email]'); await p.type('[name=email]', 'luca@test.it'); await p.type('[name=password]', 'venditore1');
+await p.evaluate(() => [...document.querySelectorAll('button')].find(x => x.innerText.includes('Accedi')).click());
+await p.waitForFunction(() => document.body.innerText.includes('13.487'), { timeout: 180000 });
+await p.evaluate(() => { document.querySelector('details').open = true; });
+await p.type('[data-f=citta]', 'Savona'); await sleep(1000);
+await p.evaluate(() => { const r = document.querySelector('.resbar').getBoundingClientRect(); window.scrollBy(0, r.top - 90); }); await sleep(400);
+await p.screenshot({ path: 'screenshots/05_lista_savona.png' });
+await b.close(); console.log('ok');
