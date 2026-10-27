@@ -1,44 +1,98 @@
-# GitHub Actions (macOS): build iOS firmata con App Store Connect API key e upload su TestFlight.
-# Secrets richiesti nel repository (Settings > Secrets and variables > Actions):
-#   ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (contenuto del file .p8), APPLE_TEAM_ID
+# Natom Visite - build iOS firmata (firma automatica nel cloud con chiave API App Store Connect) + upload TestFlight.
+# Secrets (Settings > Secrets and variables > Actions): ASC_KEY_ID, ASC_ISSUER_ID, ASC_KEY_P8 (testo .p8 o base64), APPLE_TEAM_ID
+# Il database lead (public/base.json) NON è nel repository: l'app scarica i negozi dal cloud Firebase al primo accesso.
+# Prerequisito una tantum: l'app "Natom Visite" (bundle com.natomdiamonds.visite) deve esistere in App Store Connect.
 name: iOS TestFlight
 on:
-  # solo avvio manuale (Actions > iOS TestFlight > Run workflow) dopo aver inserito i secrets Apple
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "ios/**", "index.html", "public/**", "package*.json", "capacitor.config.json", ".github/workflows/ios-testflight.yml"]
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MARKETING_VERSION: "1.0.0"
+  BUNDLE_ID: com.natomdiamonds.visite
+
 jobs:
-  ios:
+  testflight:
+    # solo dal repository originale e solo se avviato dal proprietario
+    if: github.repository == 'nadav1983/natom-visite' && github.actor == github.repository_owner
     runs-on: macos-15
     timeout-minutes: 60
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
-      - run: npm ci
-      - run: npm run build
-      - run: npx cap sync ios
-      - run: cd ios/App && pod install
-      - name: Chiave App Store Connect
+      - name: Check secrets
         run: |
-          mkdir -p ~/private_keys
-          echo "${{ secrets.ASC_KEY_P8 }}" > ~/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8
-      - name: Archive (firma automatica)
+          for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8 APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || { echo "::error::Manca il secret $v"; exit 1; }
+          done
+      - name: Install API key
         run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          KEY=~/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8
+          if printf '%s' "$ASC_KEY_P8" | grep -q 'BEGIN PRIVATE KEY'; then printf '%s\n' "$ASC_KEY_P8" > "$KEY"
+          else printf '%s' "$ASC_KEY_P8" | base64 --decode > "$KEY"; fi
+          grep -q 'BEGIN PRIVATE KEY' "$KEY" || { echo "::error::ASC_KEY_P8 non è un .p8 valido"; exit 1; }
+          chmod 600 "$KEY"; echo "ASC_KEY_PATH=$KEY" >> "$GITHUB_ENV"
+      - name: Web build + Capacitor sync (senza base.json)
+        run: |
+          npm ci
+          rm -f public/base.json
+          npm run build
+          test ! -f dist/base.json
+          npx cap sync ios
+      - name: Archive (non firmato; la firma App Store avviene all'export)
+        run: |
+          BUILD_NUMBER=$(( ${{ github.run_number }} * 10 + ${{ github.run_attempt }} ))
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          xcodebuild -version
           cd ios/App
           xcodebuild -workspace App.xcworkspace -scheme App -configuration Release \
-            -destination 'generic/platform=iOS' -archivePath $RUNNER_TEMP/App.xcarchive \
-            DEVELOPMENT_TEAM=${{ secrets.APPLE_TEAM_ID }} CODE_SIGN_STYLE=Automatic \
-            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8 \
-            -authenticationKeyID ${{ secrets.ASC_KEY_ID }} \
-            -authenticationKeyIssuerID ${{ secrets.ASC_ISSUER_ID }} \
+            -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            MARKETING_VERSION="$MARKETING_VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             archive
-      - name: Export + upload su TestFlight
+          PL="$RUNNER_TEMP/App.xcarchive/Products/Applications/App.app/Info.plist"
+          echo "Versione: $(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$PL") ($(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$PL"))"
+      - name: Export IPA + upload TestFlight
         run: |
-          sed "s/TEAM_ID_PLACEHOLDER/${{ secrets.APPLE_TEAM_ID }}/" ios-build/ExportOptions.plist > $RUNNER_TEMP/ExportOptions.plist
-          xcodebuild -exportArchive -archivePath $RUNNER_TEMP/App.xcarchive \
-            -exportOptionsPlist $RUNNER_TEMP/ExportOptions.plist -exportPath $RUNNER_TEMP/export \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/private_keys/AuthKey_${{ secrets.ASC_KEY_ID }}.p8 \
-            -authenticationKeyID ${{ secrets.ASC_KEY_ID }} \
-            -authenticationKeyIssuerID ${{ secrets.ASC_ISSUER_ID }}
+          mk_opts() { cat > "$1" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>$2</string>
+            <key>teamID</key><string>${APPLE_TEAM_ID}</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>testFlightInternalTestingOnly</key><false/>
+          </dict></plist>
+          PLIST
+          }
+          mk_opts "$RUNNER_TEMP/export.plist" export
+          mk_opts "$RUNNER_TEMP/upload.plist" upload
+          AUTH=(-allowProvisioningUpdates -authenticationKeyPath "$ASC_KEY_PATH" -authenticationKeyID "$ASC_KEY_ID" -authenticationKeyIssuerID "$ASC_ISSUER_ID")
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/App.xcarchive" -exportPath "$RUNNER_TEMP/ipa" -exportOptionsPlist "$RUNNER_TEMP/export.plist" "${AUTH[@]}"
+          ls -la "$RUNNER_TEMP/ipa"
+          xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/App.xcarchive" -exportPath "$RUNNER_TEMP/upload" -exportOptionsPlist "$RUNNER_TEMP/upload.plist" "${AUTH[@]}"
+          echo "Caricata build $MARKETING_VERSION ($BUILD_NUMBER): dopo 5-30 min appare in App Store Connect > TestFlight." >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove API key
+        if: always()
+        run: rm -rf ~/.appstoreconnect/private_keys
