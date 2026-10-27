@@ -121,6 +121,7 @@ function startChanges(since) {
       const h = location.hash;
       if (h.startsWith('#/shop/')) { const id = decodeURIComponent(h.slice(7)); if (touched.some(t => t._id === id) && !editDirty()) route(); }
       else if (h === '' || h === '#/' || h === '#/menu') route();
+      else if (h === '#/attivita') drawActivity();
     }, 400);
   }, e => console.warn('changes', e));
 }
@@ -139,6 +140,7 @@ function route() {
   if (h === '#/new') return viewNew();
   if (h === '#/menu') return viewMenu();
   if (h === '#/admin') return viewAdmin();
+  if (h === '#/attivita') return viewActivity();
   if (h === '#/legenda') return viewLegenda();
   if (h.startsWith('#/history/')) return viewHistory(decodeURIComponent(h.slice(10)));
   return viewList();
@@ -478,7 +480,8 @@ function viewMenu() {
    <div class="stat"><span>Modificati oggi</span><b>${rows.filter(r => (r.ultima_modifica || '').startsWith(t)).length}</b></div></div>
   <button class="btn gold" id="exAll">⬇ Scarica Excel aggiornato</button>
   <button class="btn" id="exToday">⬇ Scarica solo modifiche di oggi</button>
-  ${adm ? `<button class="btn" id="users">👥 Gestione utenti ${pend ? `<span class="pill">${pend}</span>` : ''}</button>
+  ${adm ? `<button class="btn" id="act">📋 Attività venditori</button>
+  <button class="btn" id="users">👥 Gestione utenti ${pend ? `<span class="pill">${pend}</span>` : ''}</button>
   <button class="btn light" id="legBtn">🎨 Legenda colori</button>
   <button class="btn light" id="imp">⬆ Importa Excel nel database</button>
   ${S.dataset === null ? '<button class="btn light" id="loadBase">Carica database iniziale</button>' : ''}<div id="prog" class="muted"></div>` : ''}
@@ -491,7 +494,7 @@ function viewMenu() {
   $('#exAll').onclick = () => doExport(false);
   $('#exToday').onclick = () => doExport(true);
   $('#out').onclick = async () => { if (S.pending && !confirm('Ci sono modifiche non ancora inviate. Uscire comunque?')) return; await C.logout(); location.hash = '#/'; };
-  if (adm) { $('#users').onclick = () => go('#/admin'); $('#legBtn').onclick = () => go('#/legenda'); $('#imp').onclick = () => pickExcel(); const lb = $('#loadBase'); if (lb) lb.onclick = () => uploadBase(); }
+  if (adm) { $('#act').onclick = () => go('#/attivita'); $('#users').onclick = () => go('#/admin'); $('#legBtn').onclick = () => go('#/legenda'); $('#imp').onclick = () => pickExcel(); const lb = $('#loadBase'); if (lb) lb.onclick = () => uploadBase(); }
 }
 function sortedRows(todayOnly) {
   let rows = [...S.rows.values()]; if (todayOnly) rows = rows.filter(r => (r.ultima_modifica || '').startsWith(today()));
@@ -598,6 +601,94 @@ function viewLegenda() {
     S.legenda = { ...LEGENDA_DEFAULT, ...d };
     try { const p = C.setConfig('legenda', { ...d, modificato_da: S.profile.nome, ultima_modifica: nowStamp() }); toast(S.online ? 'Legenda salvata ✓' : 'Salvata, verrà sincronizzata appena torna la connessione'); await p; } catch (e) { toast(errIt(e)); }
   };
+}
+
+// ---------------- Attività venditori (solo admin) ----------------
+// Negozi aggiunti/modificati per utente. Candidati = negozi con updatedAt nel periodo (cache locale, già aggiornata
+// in tempo reale da watchChanges/onSnapshot); per ognuno si legge solo lo storico del periodo (poche letture).
+const ACT = { period: 'oggi', who: '', cache: new Map(), seq: 0 };
+const ACT_MAX = 250;
+function actRange(p) {
+  const d0 = new Date(); d0.setHours(0, 0, 0, 0); const day = 864e5;
+  if (p === 'ieri') return [d0.getTime() - day, d0.getTime()];
+  if (p === '7g') return [d0.getTime() - 6 * day, Infinity];
+  return [d0.getTime(), Infinity];
+}
+const rowTime = r => Math.max(r._u || 0, r._local ? r._localAt || 0 : 0);
+const shortV = v => { const t = String(v ?? '').trim(); return t ? (t.length > 28 ? t.slice(0, 27) + '…' : t) : '—'; };
+function summarize(mods, nuovo) {
+  const out = [];
+  for (const [k, v] of Object.entries(mods)) {
+    if (nuovo && !['colore', 'esito', 'note_visita', 'visitato'].includes(k)) continue;
+    const L = { note_visita: 'note', ragione_sociale: 'nome', data_ricontatto: 'ricontatto', prossimo_passo: 'prossimo passo', data_visita: 'data visita' }[k] || k;
+    if (k === 'note_visita') out.push(empty(v.da) ? 'note aggiunte' : empty(v.a) ? 'note cancellate' : 'note modificate');
+    else if (k === 'colore') out.push(`colore: ${esc(shortV(v.da))} → <b>${esc(shortV(v.a))}</b>`);
+    else out.push(`${esc(L)}: ${esc(shortV(v.da))} → <b>${esc(shortV(v.a))}</b>`);
+  }
+  return out;
+}
+function fmtTime(ms, p) {
+  const d = new Date(ms), hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  return p === '7g' ? d.toLocaleDateString('it-IT', { weekday: 'short', day: '2-digit', month: '2-digit' }) + ' ' + hm : hm;
+}
+function viewActivity() {
+  setTitle('Attività', true);
+  if (S.profile.ruolo !== 'admin') { app.innerHTML = '<div class="card">Solo per amministratori.</div>'; return; }
+  app.innerHTML = `<div class="chips" id="actPer">${[['oggi', 'Oggi'], ['ieri', 'Ieri'], ['7g', 'Ultimi 7 giorni']].map(([v, l]) => `<button type="button" class="chip ${ACT.period === v ? 'on' : ''}" data-p="${v}">${l}</button>`).join('')}</div>
+   <div class="chips" id="actWho" style="margin-top:8px"></div><div id="actSum" class="muted" style="margin:10px 2px"></div><div id="actList"><div class="loading">Carico le attività…</div></div>`;
+  $('#actPer').onclick = e => { const b = e.target.closest('[data-p]'); if (!b) return; ACT.period = b.dataset.p; ACT.who = ''; $('#actPer').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b)); drawActivity(); };
+  $('#actWho').onclick = e => { const b = e.target.closest('[data-w]'); if (!b) return; ACT.who = b.dataset.w; drawActivity(true); };
+  $('#actList').onclick = e => { const it = e.target.closest('[data-id]'); if (it) go('#/shop/' + encodeURIComponent(it.dataset.id)); };
+  drawActivity();
+}
+async function drawActivity(onlyFilter) {
+  if (location.hash !== '#/attivita' || !$('#actList')) return;
+  const seq = ++ACT.seq, p = ACT.period, [from, to] = actRange(p);
+  if (!onlyFilter || !ACT.entries) {
+    const cand = [...S.rows.values()].filter(r => rowTime(r) >= from).sort((a, b) => rowTime(b) - rowTime(a));
+    const take = cand.slice(0, ACT_MAX); let offline = false;
+    const hist = new Map(); let i = 0;
+    const worker = async () => { while (i < take.length) { const r = take[i++]; const key = r._id + '|' + from + '|' + rowTime(r);
+      if (ACT.cache.has(key)) { hist.set(r._id, ACT.cache.get(key)); continue; }
+      try { const h = await C.getHistorySince(r._id, from); ACT.cache.set(key, h); hist.set(r._id, h); } catch (e) { offline = true; hist.set(r._id, null); } } };
+    await Promise.all(Array.from({ length: 8 }, worker));
+    if (seq !== ACT.seq) return;
+    // un elemento per (utente, negozio): ultima ora, NUOVO se creato nel periodo, modifiche unite (primo "da" → ultimo "a")
+    const map = new Map(); let imported = 0;
+    for (const r of take) {
+      const h = hist.get(r._id);
+      if (h === null) { const k = (r.modificato_da || '?') + '|' + r._id; map.set(k, { id: r._id, nome: r.modificato_da || '?', at: rowTime(r), nuovo: false, mods: {}, n: 1, noDetail: true }); continue; }
+      const hs = h.filter(x => x.atMs >= from && x.atMs < to);
+      if (!hs.length) { if (!h.length && rowTime(r) < to) imported++; continue; }
+      for (const x of [...hs].reverse()) {
+        const k = (x.uid || x.nome) + '|' + r._id; let e = map.get(k);
+        if (!e) map.set(k, e = { id: r._id, nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0 });
+        e.at = Math.max(e.at, x.atMs); e.n++; if (x.nuovo) e.nuovo = true;
+        for (const [f, v] of Object.entries(x.modifiche || {})) e.mods[f] = e.mods[f] ? { da: e.mods[f].da, a: v.a } : { ...v };
+      }
+    }
+    ACT.entries = [...map.values()].sort((a, b) => b.at - a.at);
+    ACT.extra = { imported, truncated: cand.length - take.length, offline };
+  }
+  const all = ACT.entries, users = new Map();
+  for (const e of all) users.set(e.nome, (users.get(e.nome) || 0) + 1);
+  if (ACT.who && !users.has(ACT.who)) ACT.who = '';
+  $('#actWho').innerHTML = `<button type="button" class="chip ${!ACT.who ? 'on' : ''}" data-w="">Tutti (${all.length})</button>` +
+    [...users.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => `<button type="button" class="chip ${ACT.who === n ? 'on' : ''}" data-w="${esc(n)}">${esc(n)} (${c})</button>`).join('');
+  const list = ACT.who ? all.filter(e => e.nome === ACT.who) : all;
+  const nNew = list.filter(e => e.nuovo).length, x = ACT.extra;
+  $('#actSum').innerHTML = `<b>${list.length}</b> negozi · ${nNew} nuovi · ${list.length - nNew} modificati` +
+    (x.imported ? `<br>+ ${x.imported} aggiornati da importazione Excel` : '') + (x.truncated ? `<br>Mostrati i ${ACT_MAX} più recenti (${x.truncated} esclusi)` : '') +
+    (x.offline ? '<br>⚠ Offline: dettagli delle modifiche non disponibili per alcuni negozi' : '');
+  const groups = new Map(); for (const e of list) { if (!groups.has(e.nome)) groups.set(e.nome, []); groups.get(e.nome).push(e); }
+  $('#actList').innerHTML = list.length ? [...groups.entries()].sort((a, b) => b[1].length - a[1].length).map(([n, es]) => `<div class="sec">${esc(n)} · ${es.length}</div>` + es.map(e => {
+    const r = S.rows.get(e.id) || {}, col = coloreById(r.colore), sm = e.noDetail ? ['(dettagli non disponibili offline)'] : summarize(e.mods, e.nuovo);
+    return `<div class="item" data-id="${esc(e.id)}" ${col ? `style="border-left-color:${col.dot}"` : ''}>
+      <div class="n">${esc(r.ragione_sociale || '(senza nome)')}</div>
+      <div class="m">📍 ${esc([r.citta, r.provincia && '(' + r.provincia + ')'].filter(Boolean).join(' ') || '—')} · 🕒 ${fmtTime(e.at, p)}${e.n > 1 ? ` · ${e.n} salvataggi` : ''}</div>
+      <div><span class="badge ${e.nuovo ? 'ok' : 'cat'}">${e.nuovo ? 'NUOVO' : 'MODIFICATO'}</span></div>
+      ${sm.length ? `<div class="m">${sm.slice(0, 4).join(' · ')}${sm.length > 4 ? ` · +${sm.length - 4}` : ''}</div>` : ''}</div>`; }).join('')).join('')
+    : `<div class="card muted">Nessun negozio aggiunto o modificato ${p === 'oggi' ? 'oggi' : p === 'ieri' ? 'ieri' : 'negli ultimi 7 giorni'}.</div>`;
 }
 
 // ---------------- Amministrazione utenti ----------------

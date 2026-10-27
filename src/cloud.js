@@ -84,6 +84,11 @@ export function saveShop(id, changes, prev, user) {
   b.set(doc(collection(db, 'shops', id, 'history')), { uid: user.uid, nome: user.nome, at: serverTimestamp(), quando: changes.ultima_modifica, nuovo: !prev, modifiche: diff });
   return b.commit();
 }
+// Storico di un negozio a partire da `sinceMs` (indice automatico su "at", nessuna regola nuova)
+export async function getHistorySince(id, sinceMs) {
+  const s = await getDocs(query(collection(db, 'shops', id, 'history'), where('at', '>=', Timestamp.fromMillis(sinceMs)), orderBy('at', 'desc'), limit(30)));
+  return s.docs.map(d => { const x = d.data({ serverTimestamps: 'estimate' }); return { ...x, atMs: x.at && x.at.toMillis ? x.at.toMillis() : Date.now() }; });
+}
 export async function getHistory(id) {
   const s = await getDocs(query(collection(db, 'shops', id, 'history'), orderBy('at', 'desc'), limit(50)));
   return s.docs.map(d => d.data());
