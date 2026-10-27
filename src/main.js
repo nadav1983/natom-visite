@@ -9,6 +9,7 @@ import { ORIG_COLS, VISIT_COLS, EDIT_COLS, LABELS, ESITI, STATI_DEFAULT, CATEGOR
 import { parseWorkbook, buildWorkbook, workbookBase64, workbookArray, today, nowStamp } from './excel.js';
 
 const BASE_VERSION = 'base-2026-10-23';
+const SITE = 'https://nadav1983.github.io/natom-visite/';
 const $ = s => document.querySelector(s);
 const app = $('#app');
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -52,6 +53,8 @@ if (!isConfigured()) {
   projectId = C.init().projectId;
   L.setDbName('natom-visite-' + projectId);
   C.onAuth(onUser);
+  // Solo build di test CI (simulatore): login automatico con account demo. Mai impostato nelle build pubblicate.
+  if (import.meta.env.VITE_TEST_EMAIL) setTimeout(() => { if (!S.user) C.login(import.meta.env.VITE_TEST_EMAIL, import.meta.env.VITE_TEST_PASSWORD).catch(e => toast('TEST login: ' + (e.code || e.message), 8000)); }, 25000);
 }
 
 function clearSubs() { S.unsubs.forEach(u => { try { u(); } catch {} }); S.unsubs = []; if (S.changeUnsub) { S.changeUnsub(); S.changeUnsub = null; } }
@@ -127,6 +130,7 @@ function route() {
   if (!isConfigured()) return;
   const h = location.hash || '#/';
   if (!S.user) return h === '#/signup' ? viewSignup() : viewLogin();
+  if (h === '#/elimina') return viewDeleteAccount();
   if (!S.profile) return viewNoProfile();
   if (S.profile.stato !== 'approvato') return viewPending();
   if (S.dataset === undefined && !S.rows.size) { setTitle('Natom Visite'); app.innerHTML = '<div class="loading">Sincronizzazione…</div>'; return; }
@@ -150,7 +154,10 @@ function viewLogin() {
   <button class="btn gold" type="submit">Accedi</button>
   <button class="btn light" type="button" id="toSignup">Crea un nuovo account</button>
   <button class="link" type="button" id="forgot">Password dimenticata?</button></form>
+  <p class="muted center"><a href="#" id="privacy">Privacy</a> · <a href="#" id="support">Assistenza</a></p>
   ${EMULATOR.enabled ? '<p class="muted center">Modalità test (emulatore)</p>' : ''}`;
+  $('#privacy').onclick = e => { e.preventDefault(); openExt(SITE + 'privacy.html'); };
+  $('#support').onclick = e => { e.preventDefault(); openExt(SITE + 'support.html'); };
   $('#toSignup').onclick = () => go('#/signup');
   $('#forgot').onclick = async () => { const e = $('#f').email.value; if (!e) return toast('Scrivi prima la tua email'); try { await C.resetPassword(e); toast('Ti abbiamo mandato un\'email per la nuova password'); } catch (er) { toast(errIt(er)); } };
   $('#f').onsubmit = async ev => { ev.preventDefault(); const f = ev.target; busy(f, true); try { await C.login(f.email.value, f.password.value); } catch (er) { toast(errIt(er), 4000); busy(f, false); } };
@@ -190,8 +197,9 @@ function viewPending() {
   <p class="muted">${esc(p.nome)} · ${esc(p.email)}</p>
   ${adm ? `<div class="note">Sei l'amministratore: apri l'email di verifica che ti abbiamo mandato e tocca il link, poi premi qui sotto.</div>
   <button class="btn green" id="verified">Ho verificato l'email</button><button class="btn light" id="resend">Rimanda email di verifica</button>` : ''}
-  <button class="btn light" id="out">Esci</button></div>`;
+  <button class="btn light" id="out">Esci</button><button class="link" id="delAcc">Elimina il mio account</button></div>`;
   $('#out').onclick = () => C.logout();
+  $('#delAcc').onclick = () => go('#/elimina');
   if (adm) {
     $('#verified').onclick = async () => { try { (await C.promoteBootstrapAdmin()) ? toast('Account amministratore attivato') : toast('Email non ancora verificata'); } catch (e) { toast(errIt(e)); } };
     $('#resend').onclick = async () => { try { await C.resendVerification(); toast('Email inviata'); } catch (e) { toast(errIt(e)); } };
@@ -474,7 +482,12 @@ function viewMenu() {
   <button class="btn light" id="legBtn">🎨 Legenda colori</button>
   <button class="btn light" id="imp">⬆ Importa Excel nel database</button>
   ${S.dataset === null ? '<button class="btn light" id="loadBase">Carica database iniziale</button>' : ''}<div id="prog" class="muted"></div>` : ''}
-  <button class="btn red" id="out">Esci</button>`;
+  <button class="btn red" id="out">Esci</button>
+  <button class="btn light" id="delAcc">Elimina il mio account</button>
+  <p class="muted center"><a href="#" id="privacy">Privacy</a> · <a href="#" id="support">Assistenza</a></p>`;
+  $('#delAcc').onclick = () => go('#/elimina');
+  $('#privacy').onclick = e => { e.preventDefault(); openExt(SITE + 'privacy.html'); };
+  $('#support').onclick = e => { e.preventDefault(); openExt(SITE + 'support.html'); };
   $('#exAll').onclick = () => doExport(false);
   $('#exToday').onclick = () => doExport(true);
   $('#out').onclick = async () => { if (S.pending && !confirm('Ci sono modifiche non ancora inviate. Uscire comunque?')) return; await C.logout(); location.hash = '#/'; };
@@ -551,6 +564,24 @@ async function uploadBase() {
     await C.setDataset({ version: BASE_VERSION, rows: rows.length, by: S.profile.nome });
     toast('Database caricato: ' + rows.length + ' negozi', 4000);
   } catch (e) { toast(e.code === 'no-base' ? e.message : 'Errore: ' + errIt(e), 6000); }
+}
+
+// ---------------- Eliminazione account ----------------
+function viewDeleteAccount() {
+  setTitle('Elimina account', true);
+  const adm = C.isAdminEmail(S.user.email);
+  app.innerHTML = `<form class="card" id="f"><h2>Elimina il mio account</h2>
+  <p>Il tuo account (<b>${esc(S.user.email)}</b>) e i tuoi dati personali (nome, telefono) verranno eliminati definitivamente. Le note di visita già salvate restano nel database aziendale di Natom Diamonds.</p>
+  ${adm ? '<div class="note">Attenzione: questo è l\'account amministratore. Dopo l\'eliminazione nessuno potrà approvare nuovi utenti finché non ti registri di nuovo con la stessa email.</div>' : ''}
+  <label>Per confermare scrivi la tua password</label><input name="password" type="password" autocomplete="current-password" required>
+  <button class="btn red" type="submit">Elimina definitivamente</button>
+  <button class="btn light" type="button" id="cancel">Annulla</button></form>`;
+  $('#cancel').onclick = () => go(S.profile && S.profile.stato === 'approvato' ? '#/menu' : '#/');
+  $('#f').onsubmit = async ev => { ev.preventDefault(); const f = ev.target;
+    if (!confirm('Eliminare definitivamente il tuo account? L\'operazione non si può annullare.')) return;
+    busy(f, true);
+    try { await C.deleteMyAccount(f.password.value); clearSubs(); try { await L.clearAll(); } catch {} location.hash = '#/'; toast('Account eliminato', 4000); }
+    catch (er) { toast(errIt(er), 5000); busy(f, false); } };
 }
 
 // ---------------- Legenda colori (admin) ----------------

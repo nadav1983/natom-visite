@@ -1,0 +1,48 @@
+# Verifica funzionale su Simulatore iPhone (nessuna firma): avvio, login demo, sincronizzazione, screenshot.
+name: iOS Simulator check
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  sim:
+    if: github.repository == 'nadav1983/natom-visite' && github.actor == github.repository_owner
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - name: Select Xcode 26+
+        run: |
+          X=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1); [ -n "$X" ] && sudo xcode-select -s "$X"; xcodebuild -version
+      - name: Web build (test) + cap sync
+        env:
+          VITE_TEST_EMAIL: ${{ secrets.DEMO_EMAIL }}
+          VITE_TEST_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+        run: |
+          npm ci
+          rm -f public/base.json
+          npm run build > /dev/null
+          npx cap sync ios
+      - name: Build for Simulator
+        run: |
+          cd ios/App
+          xcodebuild -workspace App.xcworkspace -scheme App -configuration Debug -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/dd" CODE_SIGNING_ALLOWED=NO build -quiet
+      - name: Run in Simulator + screenshots
+        run: |
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products" -maxdepth 2 -name 'App.app' | head -1)
+          UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)["devices"]
+          c=[x for k,v in d.items() if "iOS" in k for x in v if x["name"].startswith("iPhone")]
+          pm=[x for x in c if "Pro Max" in x["name"]] or c
+          print(pm[-1]["udid"]); print(pm[-1]["name"], file=sys.stderr)')
+          xcrun simctl boot "$UDID" || true; xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl launch "$UDID" com.natomdiamonds.visite
+          mkdir -p shots
+          for t in 10 40 70 110 160 220; do sleep $(( t - ${prev:-0} )); prev=$t; xcrun simctl io "$UDID" screenshot shots/t${t}s.png; done
+          xcrun simctl spawn "$UDID" log show --last 5m --style compact --predicate 'process == "App" OR process CONTAINS "WebContent"' 2>/dev/null | grep -iE "error|firebase|firestore|⚡️|console" | grep -viE "password" | tail -200 > shots/log.txt || true
+      - uses: actions/upload-artifact@v4
+        with: { name: sim-shots, path: shots, retention-days: 1 }

@@ -1,8 +1,9 @@
 // Collegamento a Firebase (Auth + Firestore) con cache offline e coda modifiche
 import { initializeApp } from 'firebase/app';
 import { initializeAuth, indexedDBLocalPersistence, browserLocalPersistence, connectAuthEmulator, createUserWithEmailAndPassword,
-  signInWithEmailAndPassword, signOut, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail } from 'firebase/auth';
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, connectFirestoreEmulator, doc, setDoc, updateDoc,
+  signInWithEmailAndPassword, signOut, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail,
+  EmailAuthProvider, reauthenticateWithCredential, deleteUser } from 'firebase/auth';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, connectFirestoreEmulator, doc, setDoc, updateDoc, deleteDoc,
   collection, query, where, onSnapshot, getDocs, writeBatch, serverTimestamp, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { firebaseConfig, EMULATOR, ADMIN_EMAIL } from './firebase-config.js';
 
@@ -106,3 +107,14 @@ export async function bulkWrite(rows, uid, withTimestamp, onProgress) {
 export const setDataset = data => setDoc(doc(db, 'config', 'dataset'), { ...data, at: serverTimestamp() });
 export const watchConfig = (id, cb, err) => onSnapshot(doc(db, 'config', id), s => cb(s.exists() ? s.data() : null), err);
 export const setConfig = (id, data) => setDoc(doc(db, 'config', id), data, { merge: true });
+
+// Eliminazione account (richiesta Apple 5.1.1(v)): conferma password, cancella il profilo
+// (o, se le regole non lo permettono, lo anonimizza) e poi l'utente Firebase Auth.
+export async function deleteMyAccount(password) {
+  const u = auth.currentUser; if (!u) throw new Error('Non sei collegato');
+  await reauthenticateWithCredential(u, EmailAuthProvider.credential(u.email, password));
+  const ref = doc(db, 'users', u.uid);
+  try { await deleteDoc(ref); }
+  catch (e) { try { await updateDoc(ref, { nome: '(account eliminato)', telefono: '' }); } catch (e2) { console.warn('profilo', e2.code); } }
+  await deleteUser(u);
+}
