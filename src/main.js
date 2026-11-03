@@ -6,7 +6,7 @@ import { isConfigured, EMULATOR } from './firebase-config.js';
 import * as C from './cloud.js';
 import * as L from './idb.js';
 import { ORIG_COLS, VISIT_COLS, EDIT_COLS, LABELS, ESITI, STATI_DEFAULT, CATEGORIE_DEFAULT, COLORI, coloreById, LEGENDA_DEFAULT } from './schema.js';
-import { parseWorkbook, buildWorkbook, workbookBase64, workbookArray, today, nowStamp } from './excel.js';
+import { parseWorkbook, buildWorkbook, addHistorySheet, workbookBase64, workbookArray, today, nowStamp } from './excel.js';
 
 const BASE_VERSION = 'base-2026-10-23';
 const SITE = 'https://nadav1983.github.io/natom-visite/';
@@ -480,6 +480,7 @@ function viewMenu() {
    <div class="stat"><span>Modificati oggi</span><b>${rows.filter(r => (r.ultima_modifica || '').startsWith(t)).length}</b></div></div>
   <button class="btn gold" id="exAll">⬇ Scarica Excel aggiornato</button>
   <button class="btn" id="exToday">⬇ Scarica solo modifiche di oggi</button>
+  <button class="btn" id="bkp">💾 Backup (Excel completo con storico)</button>
   ${adm ? `<button class="btn" id="act">📋 Attività venditori</button>
   <button class="btn" id="users">👥 Gestione utenti ${pend ? `<span class="pill">${pend}</span>` : ''}</button>
   <button class="btn light" id="legBtn">🎨 Legenda colori</button>
@@ -493,6 +494,7 @@ function viewMenu() {
   $('#support').onclick = e => { e.preventDefault(); openExt(SITE + 'support.html'); };
   $('#exAll').onclick = () => doExport(false);
   $('#exToday').onclick = () => doExport(true);
+  $('#bkp').onclick = () => doBackup();
   $('#out').onclick = async () => { if (S.pending && !confirm('Ci sono modifiche non ancora inviate. Uscire comunque?')) return; await C.logout(); location.hash = '#/'; };
   if (adm) { $('#act').onclick = () => go('#/attivita'); $('#users').onclick = () => go('#/admin'); $('#legBtn').onclick = () => go('#/legenda'); $('#imp').onclick = () => pickExcel(); const lb = $('#loadBase'); if (lb) lb.onclick = () => uploadBase(); }
 }
@@ -500,18 +502,40 @@ function sortedRows(todayOnly) {
   let rows = [...S.rows.values()]; if (todayOnly) rows = rows.filter(r => (r.ultima_modifica || '').startsWith(today()));
   return rows.sort((a, b) => { const ar = /^r\d+$/.test(a._id), br = /^r\d+$/.test(b._id); if (ar && br) return a._id < b._id ? -1 : 1; if (ar !== br) return ar ? -1 : 1; return String(a.ultima_modifica || '').localeCompare(String(b.ultima_modifica || '')); });
 }
+// Backup: Excel completo + storico delle modifiche degli ultimi BKP_DAYS giorni
+// (letture contenute: solo i negozi modificati nel periodo, max BKP_MAX)
+const BKP_DAYS = 30, BKP_MAX = 400;
+async function doBackup() {
+  const rows = sortedRows(false);
+  if (!rows.length) return toast('Nessun negozio nel database');
+  const from = Date.now() - BKP_DAYS * 864e5;
+  const cand = rows.filter(r => rowTime(r) >= from).sort((a, b) => rowTime(b) - rowTime(a)).slice(0, BKP_MAX);
+  toast(`Preparo il backup… (storico di ${cand.length} negozi)`, 8000);
+  const hist = []; let i = 0, missing = 0;
+  const worker = async () => { while (i < cand.length) { const r = cand[i++];
+    try { for (const x of await C.getHistorySince(r._id, from)) hist.push({ ...x, shopId: r._id, shop: r.ragione_sociale, citta: r.citta }); } catch { missing++; } } };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  const wb = buildWorkbook(rows, S.profile.nome, S.legenda);
+  addHistorySheet(wb, hist, `Storico ultimi ${BKP_DAYS} giorni`);
+  if (missing) toast(`Offline: storico mancante per ${missing} negozi`, 5000);
+  const d = new Date(), hm = String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
+  await shareWorkbook(wb, `NatomVisite_backup_${today()}_${hm}.xlsx`, 'Salva il backup (es. Google Drive › NATOM VISITE)');
+}
 async function doExport(todayOnly) {
   const rows = sortedRows(todayOnly);
   if (!rows.length) return toast('Nessuna modifica oggi');
   toast('Preparo il file Excel…');
   const wb = buildWorkbook(rows, S.profile.nome, S.legenda);
   const name = `Natom_Diamonds_DATABASE_${today()}${todayOnly ? '_modifiche' : ''}.xlsx`;
+  await shareWorkbook(wb, name, 'Invia o salva il file Excel');
+}
+async function shareWorkbook(wb, name, dialogTitle) {
   try {
     if (Capacitor.isNativePlatform()) {
       const data = workbookBase64(wb);
       const w = await Filesystem.writeFile({ path: name, data, directory: Directory.Cache });
       if (Capacitor.getPlatform() === 'android') { try { await Filesystem.writeFile({ path: name, data, directory: Directory.Documents }); toast('Salvato anche in Documenti'); } catch {} }
-      await Share.share({ title: name, text: name, files: [w.uri], dialogTitle: 'Invia o salva il file Excel' });
+      await Share.share({ title: name, text: name, files: [w.uri], dialogTitle });
     } else {
       const blob = new Blob([workbookArray(wb)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const file = new File([blob], name, { type: blob.type });

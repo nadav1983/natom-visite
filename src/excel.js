@@ -69,3 +69,21 @@ export function buildWorkbook(rows, who, legenda = {}) {
 export function workbookBase64(wb) { return XLSX.write(wb, { type: 'base64', bookType: 'xlsx' }); }
 export function workbookArray(wb) { return XLSX.write(wb, { type: 'array', bookType: 'xlsx' }); }
 export { ORIG_COLS, VISIT_COLS, META_COLS };
+
+// Foglio "Storico modifiche": hist = [{ atMs, nome, shopId, shop, citta, nuovo, modifiche: {campo: {da, a}} }]
+const fmtDT = ms => { const d = new Date(ms); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); };
+const valTxt = v => (v === null || v === undefined || v === '' ? '—' : String(v));
+export function addHistorySheet(wb, hist, title = 'Storico modifiche') {
+  const H = [['Data e ora', 'Utente', 'Negozio', 'Città', 'Tipo', 'Cosa è cambiato', 'id_app']];
+  for (const h of [...hist].sort((a, b) => b.atMs - a.atMs)) {
+    const what = Object.entries(h.modifiche || {}).map(([k, v]) => `${k}: ${valTxt(v?.da)} → ${valTxt(v?.a)}`).join('; ');
+    H.push([fmtDT(h.atMs), h.nome || '', h.shop || '', h.citta || '', h.nuovo ? 'NUOVO' : 'MODIFICA', what, h.shopId || '']);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(H);
+  const hs = { font: { bold: true, color: { rgb: 'FFFFFF' } }, fill: { patternType: 'solid', fgColor: { rgb: '1F2A44' } } };
+  H[0].forEach((_, j) => { ws[XLSX.utils.encode_cell({ r: 0, c: j })].s = hs; });
+  ws['!cols'] = [{ wch: 17 }, { wch: 20 }, { wch: 34 }, { wch: 16 }, { wch: 10 }, { wch: 80 }, { wch: 22 }];
+  ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: H.length - 1, c: H[0].length - 1 } }) };
+  XLSX.utils.book_append_sheet(wb, ws, title.slice(0, 31));
+  return wb;
+}
