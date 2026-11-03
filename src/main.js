@@ -25,6 +25,7 @@ function setTitle(t, back) { $('#title').innerHTML = esc(t) + syncDot(); $('#btn
 function syncDot() {
   if (!S.profile || S.profile.stato !== 'approvato') return '';
   if (!S.online) return ' <span class="sync off">● offline</span>';
+  if (S.live === false) return ' <span class="sync off">● non aggiornato</span>';
   if (S.pending > 0) return ` <span class="sync wait">● invio ${S.pending}…</span>`;
   return ' <span class="sync ok">●</span>';
 }
@@ -109,7 +110,10 @@ async function bootData() {
 let rerenderT;
 function startChanges(since) {
   if (S.changeUnsub) S.changeUnsub();
-  S.changeUnsub = C.watchChanges(since - 5 * 60 * 1000, async docs => {
+  S.changeUnsub = C.watchChanges(since - 5 * 60 * 1000, applyDocs, e => { console.warn('changes', e); S.live = false; S.changeUnsub = null; refreshTitle(); });
+  S.live = true;
+}
+async function applyDocs(docs) {
     if (!docs.length) return;
     let max = 0; const touched = [];
     for (const d of docs) { const prev = S.rows.get(d._id); const r = { ...d }; if (prev && prev._local && (prev._localAt || 0) > (d._u || 0)) continue; S.rows.set(d._id, r); touched.push(r); max = Math.max(max, d._u || 0); }
@@ -123,8 +127,27 @@ function startChanges(since) {
       else if (h === '' || h === '#/' || h === '#/menu') route();
       else if (h === '#/attivita') drawActivity();
     }, 400);
-  }, e => console.warn('changes', e));
 }
+// Tasto Aggiorna: legge dal SERVER (non dalla cache) i negozi cambiati dall'ultima sincronizzazione e riaggancia il tempo reale
+async function forceRefresh() {
+  if (!navigator.onLine) throw new Error('Sei offline: collegati a internet e riprova');
+  const meta = (await L.getMeta('state')) || {};
+  const docs = await withTimeout(C.fetchChangedFromServer((meta.lastSync || 0) - 5 * 60 * 1000), 20000);
+  await applyDocs(docs); await reattach(); return docs.length;
+}
+const withTimeout = (p, ms) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('Il server non risponde (connessione lenta?)')), ms))]);
+// Riaggancia l'ascolto in tempo reale (ritorno dall'app in background, rete tornata, tasto Aggiorna)
+async function reattach() {
+  if (!S.user || S.profile?.stato !== 'approvato' || S.dataset === undefined) return;
+  const meta = (await L.getMeta('state')) || {};
+  startChanges(meta.lastSync || 0); refreshTitle();
+}
+let lastHidden = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { lastHidden = Date.now(); return; }
+  if (Date.now() - lastHidden > 30000 || S.live === false) reattach();
+});
+window.addEventListener('online', () => reattach());
 
 // ---------------- Router ----------------
 function route() {
@@ -272,7 +295,7 @@ function viewList() {
   const regs = countOpts('regione').map(([k, n]) => [k, `${k} (${n})`]);
   const esiti = [...new Set([...ESITI, ...countOpts('esito').map(x => x[0])])].map(e => [e, e]).concat([['(nessuno)', 'Nessun esito']]);
   const sino = [['si', 'Sì'], ['no', 'No']];
-  app.innerHTML = `<input id="q" type="search" placeholder="🔍 Cerca nome, indirizzo, referente…" value="${esc(f.q || '')}">
+  app.innerHTML = `<button class="btn light" id="listRefresh" style="margin:0 0 8px">🔄 Aggiorna</button><input id="q" type="search" placeholder="🔍 Cerca nome, indirizzo, referente…" value="${esc(f.q || '')}">
   <details class="filters card" ${S.filtersClosed ? '' : 'open'} id="fbox"><summary>Filtri ${nf ? `<span class="pill">${nf}</span>` : ''}</summary>
    <label>Città / paese</label><input data-f="citta" list="dlCitta" value="${esc(f.citta || '')}" placeholder="Scrivi, es. Savona" autocomplete="off"><datalist id="dlCitta">${cityOptions().slice(0, 600).map(c => `<option value="${esc(c.label)}">${c.n} negozi</option>`).join('')}</datalist>
    <div class="row2">${sel('provincia', 'Provincia', provs)}${sel('regione', 'Regione', regs)}</div>
@@ -303,6 +326,9 @@ function viewList() {
   };
   let t; const save = () => { localStorage.setItem('nv_filters', JSON.stringify(S.filters)); S.page = 50; clearTimeout(t); t = setTimeout(draw, 180); };
   $('#q').oninput = e => { S.filters.q = e.target.value; save(); };
+  $('#listRefresh').onclick = async e => { const b = e.target; b.disabled = true; b.textContent = '🔄 Aggiorno…';
+    try { const n = await forceRefresh(); toast(n ? `Aggiornato: ${n} negozi cambiati` : 'Già aggiornato ✓'); } catch (er) { toast(errIt(er), 5000); }
+    if (b.isConnected) { b.disabled = false; b.textContent = '🔄 Aggiorna'; } };
   app.querySelectorAll('[data-f]').forEach(el => { el.oninput = el.onchange = () => { S.filters[el.dataset.f] = el.value; save(); }; });
   $('#reset').onclick = () => { S.filters = {}; localStorage.removeItem('nv_filters'); viewList(); };
   let lp = null, lpFired = false;
@@ -668,9 +694,12 @@ function viewActivity() {
   setTitle('Attività', true);
   if (S.profile.ruolo !== 'admin' && !Array.isArray(S.profile.canViewActivityOf)) { app.innerHTML = '<div class="card">Non hai il permesso di vedere le attività. Chiedi all\'amministratore.</div>'; return; }
   app.innerHTML = `<div class="chips" id="actPer">${[['oggi', 'Oggi'], ['ieri', 'Ieri'], ['7g', 'Ultimi 7 giorni'], ['30g', 'Ultimi 30 giorni'], ['sempre', 'Da sempre']].map(([v, l]) => `<button type="button" class="chip ${ACT.period === v ? 'on' : ''}" data-p="${v}">${l}</button>`).join('')}</div>
-   <div class="chips" id="actWho" style="margin-top:8px"></div><div id="actSum" class="muted" style="margin:10px 2px"></div><div id="actList"><div class="loading">Carico le attività…</div></div>`;
+   <button class="btn light" id="actRefresh" style="margin-top:8px">🔄 Aggiorna</button><div class="chips" id="actWho" style="margin-top:8px"></div><div id="actSum" class="muted" style="margin:10px 2px"></div><div id="actList"><div class="loading">Carico le attività…</div></div>`;
   $('#actPer').onclick = e => { const b = e.target.closest('[data-p]'); if (!b) return; ACT.period = b.dataset.p; ACT.who = ''; $('#actPer').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b)); drawActivity(); };
   $('#actWho').onclick = e => { const b = e.target.closest('[data-w]'); if (!b) return; ACT.who = b.dataset.w; drawActivity(true); };
+  $('#actRefresh').onclick = async e => { const b = e.target; b.disabled = true; b.textContent = '🔄 Aggiorno…';
+    try { await forceRefresh(); } catch (er) { toast(errIt(er), 5000); }
+    if (b.isConnected) { b.disabled = false; b.textContent = '🔄 Aggiorna'; } ACT.entries = null; drawActivity(); };
   $('#actList').onclick = e => { const it = e.target.closest('[data-id]'); if (it) go('#/shop/' + encodeURIComponent(it.dataset.id)); };
   drawActivity();
 }
@@ -678,32 +707,53 @@ async function drawActivity(onlyFilter) {
   if (location.hash !== '#/attivita' || !$('#actList')) return;
   const seq = ++ACT.seq, p = ACT.period, [from, to] = actRange(p);
   if (!onlyFilter || !ACT.entries) {
-    const cand = [...S.rows.values()].filter(r => rowTime(r) >= from).sort((a, b) => rowTime(b) - rowTime(a));
-    const take = cand.slice(0, actMax(p)); let offline = false;
-    const hist = new Map(); let i = 0;
-    const worker = async () => { while (i < take.length) { const r = take[i++]; const key = r._id + '|' + from + '|' + rowTime(r);
-      const kAll = r._id + '|0|' + rowTime(r);
-      if (ACT.cache.has(key)) { hist.set(r._id, ACT.cache.get(key)); continue; }
-      if (ACT.cache.has(kAll)) { hist.set(r._id, ACT.cache.get(kAll)); continue; }
-      try { const h = await C.getHistorySince(r._id, from, LONG(p) ? 500 : 30); ACT.cache.set(key, h); hist.set(r._id, h); } catch (e) { offline = true; hist.set(r._id, null); } } };
-    await Promise.all(Array.from({ length: 8 }, worker));
-    if (seq !== ACT.seq) return;
-    // un elemento per (utente, negozio): ultima ora, NUOVO se creato nel periodo, modifiche unite (primo "da" → ultimo "a")
-    const map = new Map(); let imported = 0;
-    for (const r of take) {
-      const h = hist.get(r._id);
-      if (h === null) { const k = (r.modificato_da || '?') + '|' + r._id; map.set(k, { id: r._id, nome: r.modificato_da || '?', at: rowTime(r), nuovo: false, mods: {}, n: 1, noDetail: true }); continue; }
-      const hs = h.filter(x => x.atMs >= from && x.atMs < to);
-      if (!hs.length) { if (!h.length && rowTime(r) < to) imported++; continue; }
-      for (const x of [...hs].reverse()) {
-        const k = (x.uid || x.nome) + '|' + r._id + (MULTI(p) ? '|' + dayKey(x.atMs) : ''); let e = map.get(k);
-        if (!e) map.set(k, e = { id: r._id, uid: x.uid || '', nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0 });
-        e.at = Math.max(e.at, x.atMs); e.n++; if (x.nuovo) e.nuovo = true;
-        for (const [f, v] of Object.entries(x.modifiche || {})) e.mods[f] = e.mods[f] ? { da: e.mods[f].da, a: v.a } : { ...v };
+    if (ACT.loading) { ACT.again = true; return; }
+    ACT.loading = true; ACT.again = false;
+    const listEl = () => $('#actList');
+    try {
+      // cache locale dello storico per negozio: si rilegge dal server SOLO se il negozio è cambiato dopo l'ultima lettura
+      if (!ACT.hc) { let c = null; try { c = await L.getMeta('acthist'); } catch {} ACT.hc = new Map(Object.entries(c || {})); }
+      // candidati: solo negozi davvero toccati dall'app (data > 0 e "ultima modifica"/"modificato da"), non i 13.000 del database iniziale
+      const cand = [...S.rows.values()].filter(r => rowTime(r) > 0 && rowTime(r) >= from && (r.ultima_modifica || r.modificato_da)).sort((a, b) => rowTime(b) - rowTime(a));
+      const take = cand.slice(0, actMax(p));
+      const need = take.filter(r => { const c = ACT.hc.get(r._id); return !c || c.t < rowTime(r); });
+      let i = 0, done = 0, failed = 0, lastP = 0;
+      const prog = () => { const el = listEl(); if (el && need.length > 5 && Date.now() - lastP > 250) { lastP = Date.now(); el.innerHTML = `<div class="loading">Carico le attività… ${done}/${need.length}</div>`; } };
+      if (need.length && !navigator.onLine) failed = need.length;
+      else {
+        prog();
+        const worker = async () => { while (i < need.length) { const r = need[i++];
+          try { const h = await withTimeout(C.getHistoryAll(r._id), 15000); ACT.hc.set(r._id, { t: rowTime(r), h }); }
+          catch (e) { failed++; console.warn('history', r._id, e.code || e.message); if (e.code === 'permission-denied' || e.code === 'resource-exhausted') throw e; }
+          done++; prog(); } };
+        await Promise.all(Array.from({ length: 8 }, worker));
+        if (need.length) { try { await L.setMeta('acthist', Object.fromEntries(ACT.hc)); } catch (e) { console.warn('acthist', e); } }
       }
+      const map = new Map(); let imported = 0;
+      for (const r of take) {
+        const c = ACT.hc.get(r._id);
+        if (!c) { const k = (r.modificato_da || '?') + '|' + r._id; map.set(k, { id: r._id, uid: '', nome: r.modificato_da || '?', at: rowTime(r), nuovo: false, mods: {}, n: 1, noDetail: true }); continue; }
+        const hs = c.h.filter(x => x.atMs >= from && x.atMs < to);
+        if (!hs.length) { if (!c.h.length && rowTime(r) < to) imported++; continue; }
+        for (const x of [...hs].reverse()) {
+          const k = (x.uid || x.nome) + '|' + r._id + (MULTI(p) ? '|' + dayKey(x.atMs) : ''); let e = map.get(k);
+          if (!e) map.set(k, e = { id: r._id, uid: x.uid || '', nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0 });
+          e.at = Math.max(e.at, x.atMs); e.n++; if (x.nuovo) e.nuovo = true;
+          for (const [f, v] of Object.entries(x.modifiche || {})) e.mods[f] = e.mods[f] ? { da: e.mods[f].da, a: v.a } : { ...v };
+        }
+      }
+      ACT.entries = [...map.values()].sort((a, b) => b.at - a.at);
+      ACT.extra = { imported, truncated: cand.length - take.length, offline: failed > 0 };
+    } catch (e) {
+      console.error('attivita', e); ACT.entries = null;
+      const el = listEl();
+      if (el) { el.innerHTML = `<div class="card"><b>Non riesco a caricare le attività.</b><div class="muted">${esc(errIt(e))}</div><button class="btn gold" id="actRetry">Riprova</button></div>`; $('#actRetry').onclick = () => drawActivity(); }
+      return;
+    } finally {
+      ACT.loading = false;
+      if (ACT.again) { ACT.again = false; setTimeout(() => drawActivity(), 0); }
     }
-    ACT.entries = [...map.values()].sort((a, b) => b.at - a.at);
-    ACT.extra = { imported, truncated: cand.length - take.length, offline };
+    if (ACT.again || location.hash !== '#/attivita' || !$('#actList')) return;
   }
   const ok = S.profile.ruolo === 'admin' ? null : new Set(S.profile.canViewActivityOf || []);
   const all = ok ? ACT.entries.filter(e => !e.noDetail && ok.has(e.uid)) : ACT.entries, users = new Map();

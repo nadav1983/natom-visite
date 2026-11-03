@@ -67,6 +67,9 @@ await A.evaluate(() => document.querySelector('#actPer [data-p="7g"]').click());
   const r = await fetch(`http://localhost:8080/v1/projects/${PJ}/databases/(default)/documents/shops/${idA}/history`, { method: 'POST', headers: { Authorization: 'Bearer owner', 'content-type': 'application/json' },
     body: JSON.stringify({ fields: { nome: { stringValue: 'Luca Rossi' }, uid: { stringValue: 'x' }, at: { timestampValue: old.toISOString() }, nuovo: { booleanValue: false }, modifiche: { mapValue: { fields: { esito: { mapValue: { fields: { da: { nullValue: null }, a: { stringValue: 'richiamare' } } } } } } } } }) });
   if (!r.ok) fail('insert storico vecchio ' + r.status);
+  // come fa l'app (writeBatch): anche il negozio riceve un nuovo updatedAt, così la cache locale dello storico si rinnova
+  const r2 = await fetch(`http://localhost:8080/v1/projects/${PJ}/databases/(default)/documents/shops/${idA}?updateMask.fieldPaths=updatedAt`, { method: 'PATCH', headers: { Authorization: 'Bearer owner', 'content-type': 'application/json' }, body: JSON.stringify({ fields: { updatedAt: { timestampValue: new Date().toISOString() } } }) });
+  if (!r2.ok) fail('touch negozio ' + r2.status); await sleep(1500);
   await A.evaluate(() => document.querySelector('#actPer [data-p="30g"]').click()); await sleep(1500);
   if ((await A.$eval('#actList', e => e.innerText)).includes('richiamare')) fail('voce di 40 giorni fa visibile in 30 giorni');
   await A.evaluate(() => document.querySelector('#actPer [data-p=sempre]').click());
@@ -85,5 +88,5 @@ await A.screenshot({ path: 'screenshots/attivita.png' }); log('screenshot salvat
 // tap apre la scheda
 await A.evaluate(() => document.querySelector('#actList [data-id]').click()); await waitText(A, 'Storico modifiche'); log('tap → scheda negozio aperta:', await A.$eval('.dname', e => e.innerText));
 // un venditore non vede la pagina
-await B.evaluate(() => (location.hash = '#/attivita')); await waitText(B, 'Solo per amministratori'); log('venditore su #/attivita → "Solo per amministratori" ✓');
+await B.evaluate(() => (location.hash = '#/attivita')); await waitText(B, 'Non hai il permesso'); log('venditore senza permesso su #/attivita → "Non hai il permesso" ✓');
 await browser.close(); log(process.exitCode ? 'TEST FALLITO' : 'TEST OK');

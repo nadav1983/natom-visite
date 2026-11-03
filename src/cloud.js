@@ -4,7 +4,7 @@ import { initializeAuth, indexedDBLocalPersistence, browserLocalPersistence, con
   signInWithEmailAndPassword, signOut, onAuthStateChanged, sendEmailVerification, sendPasswordResetEmail,
   EmailAuthProvider, reauthenticateWithCredential, deleteUser } from 'firebase/auth';
 import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, connectFirestoreEmulator, doc, setDoc, updateDoc, deleteDoc,
-  collection, query, where, onSnapshot, getDocs, writeBatch, serverTimestamp, Timestamp, orderBy, limit } from 'firebase/firestore';
+  collection, query, where, onSnapshot, getDocs, getDocsFromServer, writeBatch, serverTimestamp, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { firebaseConfig, EMULATOR, ADMIN_EMAIL } from './firebase-config.js';
 
 let app, auth, db;
@@ -71,6 +71,16 @@ export function watchChanges(sinceMs, cb, err) {
     s.docChanges().forEach(c => { if (c.type !== 'removed') out.push(fromDoc(c.doc.id, c.doc.data({ serverTimestamps: 'estimate' }))); });
     cb(out);
   }, err);
+}
+// Lettura forzata dal server (tasto Aggiorna): solo i negozi cambiati dopo sinceMs
+export async function fetchChangedFromServer(sinceMs) {
+  const s = await getDocsFromServer(query(collection(db, 'shops'), where('updatedAt', '>', Timestamp.fromMillis(Math.max(0, sinceMs)))));
+  return s.docs.map(d => fromDoc(d.id, d.data()));
+}
+// Storico completo di un negozio dal server (pagina Attività)
+export async function getHistoryAll(id, lim = 500) {
+  const s = await getDocsFromServer(query(collection(db, 'shops', id, 'history'), orderBy('at', 'desc'), limit(lim)));
+  return s.docs.map(d => { const x = d.data({ serverTimestamps: 'estimate' }); return { uid: x.uid || '', nome: x.nome || '', nuovo: !!x.nuovo, modifiche: x.modifiche || {}, atMs: x.at && x.at.toMillis ? x.at.toMillis() : Date.now() }; });
 }
 export const newShopId = () => doc(collection(db, 'shops')).id;
 
