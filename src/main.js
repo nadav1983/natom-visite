@@ -481,7 +481,8 @@ function viewMenu() {
   <button class="btn gold" id="exAll">⬇ Scarica Excel aggiornato</button>
   <button class="btn" id="exToday">⬇ Scarica solo modifiche di oggi</button>
   <button class="btn" id="bkp">💾 Backup (Excel completo con storico)</button>
-  ${adm ? `<button class="btn" id="act">📋 Attività venditori</button>
+  ${adm || (Array.isArray(p.canViewActivityOf) && p.canViewActivityOf.length) ? '<button class="btn" id="act">📋 Attività venditori</button>' : ''}
+  ${adm ? `
   <button class="btn" id="users">👥 Gestione utenti ${pend ? `<span class="pill">${pend}</span>` : ''}</button>
   <button class="btn light" id="legBtn">🎨 Legenda colori</button>
   <button class="btn light" id="imp">⬆ Importa Excel nel database</button>
@@ -496,7 +497,8 @@ function viewMenu() {
   $('#exToday').onclick = () => doExport(true);
   $('#bkp').onclick = () => doBackup();
   $('#out').onclick = async () => { if (S.pending && !confirm('Ci sono modifiche non ancora inviate. Uscire comunque?')) return; await C.logout(); location.hash = '#/'; };
-  if (adm) { $('#act').onclick = () => go('#/attivita'); $('#users').onclick = () => go('#/admin'); $('#legBtn').onclick = () => go('#/legenda'); $('#imp').onclick = () => pickExcel(); const lb = $('#loadBase'); if (lb) lb.onclick = () => uploadBase(); }
+  if ($('#act')) $('#act').onclick = () => go('#/attivita');
+  if (adm) { $('#users').onclick = () => go('#/admin'); $('#legBtn').onclick = () => go('#/legenda'); $('#imp').onclick = () => pickExcel(); const lb = $('#loadBase'); if (lb) lb.onclick = () => uploadBase(); }
 }
 function sortedRows(todayOnly) {
   let rows = [...S.rows.values()]; if (todayOnly) rows = rows.filter(r => (r.ultima_modifica || '').startsWith(today()));
@@ -627,7 +629,7 @@ function viewLegenda() {
   };
 }
 
-// ---------------- Attività venditori (solo admin) ----------------
+// ---------------- Attività venditori (admin + utenti con canViewActivity dati dall admin) ----------------
 // Negozi aggiunti/modificati per utente. Candidati = negozi con updatedAt nel periodo (cache locale, già aggiornata
 // in tempo reale da watchChanges/onSnapshot); per ognuno si legge solo lo storico del periodo (poche letture).
 const ACT = { period: 'oggi', who: '', cache: new Map(), seq: 0 };
@@ -664,7 +666,7 @@ function fmtTime(ms, p) {
 }
 function viewActivity() {
   setTitle('Attività', true);
-  if (S.profile.ruolo !== 'admin') { app.innerHTML = '<div class="card">Solo per amministratori.</div>'; return; }
+  if (S.profile.ruolo !== 'admin' && !Array.isArray(S.profile.canViewActivityOf)) { app.innerHTML = '<div class="card">Non hai il permesso di vedere le attività. Chiedi all\'amministratore.</div>'; return; }
   app.innerHTML = `<div class="chips" id="actPer">${[['oggi', 'Oggi'], ['ieri', 'Ieri'], ['7g', 'Ultimi 7 giorni'], ['30g', 'Ultimi 30 giorni'], ['sempre', 'Da sempre']].map(([v, l]) => `<button type="button" class="chip ${ACT.period === v ? 'on' : ''}" data-p="${v}">${l}</button>`).join('')}</div>
    <div class="chips" id="actWho" style="margin-top:8px"></div><div id="actSum" class="muted" style="margin:10px 2px"></div><div id="actList"><div class="loading">Carico le attività…</div></div>`;
   $('#actPer').onclick = e => { const b = e.target.closest('[data-p]'); if (!b) return; ACT.period = b.dataset.p; ACT.who = ''; $('#actPer').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b)); drawActivity(); };
@@ -695,7 +697,7 @@ async function drawActivity(onlyFilter) {
       if (!hs.length) { if (!h.length && rowTime(r) < to) imported++; continue; }
       for (const x of [...hs].reverse()) {
         const k = (x.uid || x.nome) + '|' + r._id + (MULTI(p) ? '|' + dayKey(x.atMs) : ''); let e = map.get(k);
-        if (!e) map.set(k, e = { id: r._id, nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0 });
+        if (!e) map.set(k, e = { id: r._id, uid: x.uid || '', nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0 });
         e.at = Math.max(e.at, x.atMs); e.n++; if (x.nuovo) e.nuovo = true;
         for (const [f, v] of Object.entries(x.modifiche || {})) e.mods[f] = e.mods[f] ? { da: e.mods[f].da, a: v.a } : { ...v };
       }
@@ -703,7 +705,8 @@ async function drawActivity(onlyFilter) {
     ACT.entries = [...map.values()].sort((a, b) => b.at - a.at);
     ACT.extra = { imported, truncated: cand.length - take.length, offline };
   }
-  const all = ACT.entries, users = new Map();
+  const ok = S.profile.ruolo === 'admin' ? null : new Set(S.profile.canViewActivityOf || []);
+  const all = ok ? ACT.entries.filter(e => !e.noDetail && ok.has(e.uid)) : ACT.entries, users = new Map();
   for (const e of all) users.set(e.nome, (users.get(e.nome) || 0) + 1);
   if (ACT.who && !users.has(ACT.who)) ACT.who = '';
   $('#actWho').innerHTML = `<button type="button" class="chip ${!ACT.who ? 'on' : ''}" data-w="">Tutti (${all.length})</button>` +
@@ -739,7 +742,7 @@ function drawAdmin() {
   app.innerHTML = `<div class="sec">Richieste in attesa (${by('in_attesa').length})</div>
   ${by('in_attesa').map(u => card(u, `<div class="row2"><button class="btn green" data-a="approva">Approva</button><button class="btn red" data-a="rifiuta">Rifiuta</button></div>`)).join('') || '<div class="card muted">Nessuna richiesta.</div>'}
   <div class="sec">Utenti approvati (${by('approvato').length})</div>
-  ${by('approvato').map(u => card(u, u.id === me ? '<div class="muted">(sei tu)</div>' : `<label>Ruolo</label><select data-role><option value="venditore" ${u.ruolo === 'venditore' ? 'selected' : ''}>venditore</option><option value="admin" ${u.ruolo === 'admin' ? 'selected' : ''}>admin</option></select><button class="btn light" data-a="revoca">Revoca accesso</button>`)).join('')}
+  ${by('approvato').map(u => card(u, u.id === me ? '<div class="muted">(sei tu)</div>' : `${u.ruolo === 'admin' ? '' : `<button class="btn light" data-cvo>👁 Può vedere attività di altri (${(u.canViewActivityOf || []).length})</button><div data-cvl hidden>${S.users.filter(o => o.id !== u.id && o.stato === 'approvato').map(o => `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" style="width:auto" value="${esc(o.id)}" ${(u.canViewActivityOf || []).includes(o.id) ? 'checked' : ''}> ${esc(o.nome)}</label>`).join('') || '<div class="muted">Nessun altro utente.</div>'}<button class="btn gold" data-cvs>Salva</button></div>`}<label>Ruolo</label><select data-role><option value="venditore" ${u.ruolo === 'venditore' ? 'selected' : ''}>venditore</option><option value="admin" ${u.ruolo === 'admin' ? 'selected' : ''}>admin</option></select><button class="btn light" data-a="revoca">Revoca accesso</button>`)).join('')}
   <div class="sec">Rifiutati / revocati</div>
   ${[...by('rifiutato'), ...by('revocato')].map(u => card(u, `<div class="muted">${u.stato}</div><button class="btn light" data-a="approva">Riattiva / approva</button>`)).join('') || '<div class="card muted">Nessuno.</div>'}`;
   app.querySelectorAll('[data-uid]').forEach(el => {
@@ -748,6 +751,10 @@ function drawAdmin() {
       const st = { approva: 'approvato', rifiuta: 'rifiutato', revoca: 'revocato' }[b.dataset.a];
       try { await C.setUser(uid, { stato: st, approvatoDa: S.profile.nome, approvatoIl: new Date().toISOString() }); toast('Fatto: ' + st); } catch (e) { toast(errIt(e)); }
     });
+    const cvo = el.querySelector('[data-cvo]'), cvl = el.querySelector('[data-cvl]');
+    if (cvo) { cvo.onclick = () => { cvl.hidden = !cvl.hidden; }; el.querySelector('[data-cvs]').onclick = async () => {
+      const ids = [...cvl.querySelectorAll('input:checked')].map(i => i.value);
+      try { await C.setUser(uid, { canViewActivityOf: ids }); toast(ids.length ? `Può vedere ${ids.length} ${ids.length === 1 ? 'utente' : 'utenti'}` : 'Non vede le attività di nessuno'); } catch (e) { toast(errIt(e)); } }; }
     const rs = el.querySelector('[data-role]'); if (rs) rs.onchange = async () => { try { await C.setUser(uid, { ruolo: rs.value }); toast('Ruolo aggiornato'); } catch (e) { toast(errIt(e)); } };
   });
 }

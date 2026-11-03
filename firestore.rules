@@ -29,12 +29,14 @@ service cloud.firestore {
         && request.resource.data.email == request.auth.token.email
         && request.resource.data.nome is string && request.resource.data.nome.size() > 0
         && request.resource.data.telefono is string
+        // il permesso "vedere attivita'" lo da' solo l'admin
+        && !('canViewActivityOf' in request.resource.data)
         && (
           (request.resource.data.stato == 'in_attesa' && request.resource.data.ruolo == 'venditore')
           || (bootstrapAdmin() && request.resource.data.stato == 'approvato' && request.resource.data.ruolo == 'admin')
         );
 
-      // L'utente puo' cambiare solo nome/telefono; l'admin tutto (stato, ruolo)
+      // L'utente puo' cambiare solo nome/telefono; l'admin tutto (stato, ruolo, canViewActivityOf)
       allow update: if isAdmin()
         || (signedIn() && request.auth.uid == uid && onlyChanged(['nome', 'telefono']))
         // il primo admin puo' auto-promuoversi se il suo profilo esiste gia'

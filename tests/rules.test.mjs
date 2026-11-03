@@ -28,5 +28,23 @@ await expect('email simile a admin non è admin', setDoc(doc(c.db, 'users', c.u.
 await expect('utente non legge profili altrui', getDoc(doc(a.db, 'users', c.u.uid)), false);
 await expect('utente non approva altri', updateDoc(doc(a.db, 'users', c.u.uid), { stato: 'approvato' }), false);
 for (const x of [a, b, c]) await deleteApp(x.app);
+
+// ---- Permesso "vedere attività di altri" (canViewActivityOf): solo l'admin lo assegna ----
+const d = await client(`dino${t}@test.it`);
+await expect('registrazione con canViewActivityOf vietata', setDoc(doc(d.db, 'users', d.u.uid), { email: d.u.email, nome: 'D', telefono: '1', stato: 'in_attesa', ruolo: 'venditore', canViewActivityOf: [a.u.uid] }), false);
+await expect('registrazione normale', setDoc(doc(d.db, 'users', d.u.uid), { email: d.u.email, nome: 'D', telefono: '1', stato: 'in_attesa', ruolo: 'venditore' }), true);
+await expect('utente non si assegna canViewActivityOf', updateDoc(doc(d.db, 'users', d.u.uid), { canViewActivityOf: [a.u.uid] }), false);
+await expect('utente non si assegna canViewActivityOf + nome', updateDoc(doc(d.db, 'users', d.u.uid), { nome: 'D2', canViewActivityOf: [a.u.uid] }), false);
+// admin creato con accesso "owner" dell'emulatore (salta le regole)
+const adm = await client(`capo${t}@test.it`);
+const fsUrl = id => `http://localhost:8080/v1/projects/demo-natom/databases/(default)/documents/users/${id}`;
+const sv = v => ({ stringValue: v });
+await fetch(fsUrl(adm.u.uid), { method: 'PATCH', headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' }, body: JSON.stringify({ fields: { email: sv(adm.u.email), nome: sv('Capo'), telefono: sv('1'), stato: sv('approvato'), ruolo: sv('admin') } }) });
+await expect('admin assegna canViewActivityOf', updateDoc(doc(adm.db, 'users', d.u.uid), { canViewActivityOf: [a.u.uid] }), true);
+await expect('admin toglie canViewActivityOf', updateDoc(doc(adm.db, 'users', d.u.uid), { canViewActivityOf: [] }), true);
+await expect('admin approva', updateDoc(doc(adm.db, 'users', d.u.uid), { stato: 'approvato' }), true);
+await expect('utente approvato non si assegna canViewActivityOf', updateDoc(doc(d.db, 'users', d.u.uid), { canViewActivityOf: [a.u.uid] }), false);
+await expect('utente approvato cambia solo nome', updateDoc(doc(d.db, 'users', d.u.uid), { nome: 'Dino' }), true);
+for (const x of [d, adm]) await deleteApp(x.app);
 console.log(fail ? `FALLITI: ${fail}` : 'Tutti i test regole OK');
 process.exit(fail ? 1 : 0);
