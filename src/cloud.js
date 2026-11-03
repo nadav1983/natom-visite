@@ -85,8 +85,8 @@ export function saveShop(id, changes, prev, user) {
   return b.commit();
 }
 // Storico di un negozio a partire da `sinceMs` (indice automatico su "at", nessuna regola nuova)
-export async function getHistorySince(id, sinceMs) {
-  const s = await getDocs(query(collection(db, 'shops', id, 'history'), where('at', '>=', Timestamp.fromMillis(sinceMs)), orderBy('at', 'desc'), limit(30)));
+export async function getHistorySince(id, sinceMs, lim = 30) {
+  const s = await getDocs(query(collection(db, 'shops', id, 'history'), where('at', '>=', Timestamp.fromMillis(sinceMs)), orderBy('at', 'desc'), limit(lim)));
   return s.docs.map(d => { const x = d.data({ serverTimestamps: 'estimate' }); return { ...x, atMs: x.at && x.at.toMillis ? x.at.toMillis() : Date.now() }; });
 }
 export async function getHistory(id) {

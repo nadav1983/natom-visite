@@ -62,6 +62,23 @@ if (g.includes('Gioielleria Aurora')) fail('filtro non applicato');
 // periodo Ieri
 await A.evaluate(() => document.querySelector('#actPer [data-p=ieri]').click()); await waitText(A, 'Nessun negozio aggiunto o modificato ieri', 10000); log('Ieri: vuoto ✓');
 await A.evaluate(() => document.querySelector('#actPer [data-p="7g"]').click()); await A.waitForFunction(() => /6\s*negozi/.test(document.querySelector('#actSum')?.innerText || ''), { timeout: 10000 }); log('7 giorni:', (await A.$eval('#actSum', e => e.innerText)).split('\n')[0]);
+// "Da sempre": voce storica di 40 giorni fa (inserita direttamente nell'emulatore) → raggruppamento per giorno
+{ const idA = await idOf(A, 'Gioielleria Aurora'); const old = new Date(Date.now() - 40 * 864e5);
+  const r = await fetch(`http://localhost:8080/v1/projects/${PJ}/databases/(default)/documents/shops/${idA}/history`, { method: 'POST', headers: { Authorization: 'Bearer owner', 'content-type': 'application/json' },
+    body: JSON.stringify({ fields: { nome: { stringValue: 'Luca Rossi' }, uid: { stringValue: 'x' }, at: { timestampValue: old.toISOString() }, nuovo: { booleanValue: false }, modifiche: { mapValue: { fields: { esito: { mapValue: { fields: { da: { nullValue: null }, a: { stringValue: 'richiamare' } } } } } } } } }) });
+  if (!r.ok) fail('insert storico vecchio ' + r.status);
+  await A.evaluate(() => document.querySelector('#actPer [data-p="30g"]').click()); await sleep(1500);
+  if ((await A.$eval('#actList', e => e.innerText)).includes('richiamare')) fail('voce di 40 giorni fa visibile in 30 giorni');
+  await A.evaluate(() => document.querySelector('#actPer [data-p=sempre]').click());
+  await A.waitForFunction(() => /2 giorni/.test(document.querySelector('#actSum')?.innerText || ''), { timeout: 15000 }).catch(() => {});
+  const sum = await A.$eval('#actSum', e => e.innerText); log('Da sempre:', sum.split('\n')[0]);
+  const heads = await A.$$eval('#actList .sec', es => es.map(e => e.innerText)); log('intestazioni giorno:', heads.join(' | '));
+  const label = old.toLocaleDateString('it-IT', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' });
+  if (heads.length !== 2 || !heads[1].toLowerCase().includes(label.toLowerCase())) fail('gruppi per giorno inattesi (' + label + ')');
+  await A.evaluate(() => [...document.querySelectorAll('#actWho .chip')].find(b => b.innerText.startsWith('Luca')).click()); await sleep(200);
+  const l = await A.$eval('#actList', e => e.innerText); const chipsS = await A.$eval('#actWho', e => e.innerText.replace(/\n/g, ' / ')); log('chip Da sempre:', chipsS);
+  if (!l.includes('richiamare') || l.includes('Preziosi Galli')) fail('filtro venditore in Da sempre');
+  log('Da sempre + filtro Luca ✓'); await A.evaluate(() => [...document.querySelectorAll('#actWho .chip')][0].click()); }
 await A.evaluate(() => document.querySelector('#actPer [data-p=oggi]').click()); await A.waitForFunction(() => /6\s*negozi/.test(document.querySelector('#actSum')?.innerText || ''), { timeout: 10000 });
 await A.evaluate(() => { const t = document.querySelector('#toast'); t && t.classList.add('hidden'); window.scrollTo(0, 0); }); await sleep(300);
 await A.screenshot({ path: 'screenshots/attivita.png' }); log('screenshot salvato');
