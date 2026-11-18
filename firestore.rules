@@ -48,7 +48,8 @@ service cloud.firestore {
     match /shops/{shopId} {
       allow read: if approved() || isAdmin();
       allow create, update: if (approved() || isAdmin())
-        && request.resource.data.modificato_uid == request.auth.uid;
+        && request.resource.data.modificato_uid == request.auth.uid
+        && (isAdmin() || campNotTouched());
       allow delete: if isAdmin();
 
       // Storico modifiche: solo aggiunta, mai modifica/cancellazione
@@ -64,6 +65,53 @@ service cloud.firestore {
       allow read: if approved() || isAdmin();
       allow write: if isAdmin();
     }
+
+    // ================= Natom Campagne (SEZIONE DA UNIRE — NON pubblicare da sola) =================
+    // Da incollare DENTRO "match /databases/{database}/documents { ... }" di Natom Visite,
+    // PRIMA della regola finale "match /{document=**} { allow read, write: if false; }".
+    // Il server Campagne (Railway) usa l'Admin SDK con account di servizio: le regole NON lo limitano.
+    // Queste regole valgono solo per le app (Visite / pannello Campagne via client):
+    //  - gli operatori approvati possono LEGGERE lo stato di campagna dei negozi (già coperto da /shops),
+    //    ma NON possono toccare i campi camp_* (li scrive solo il server);
+    //  - solo l'admin legge coda/eventi/guard; nessun client scrive coda, eventi, guard, indici, token.
+    //
+    // 1) MODIFICA alla regola esistente di /shops/{shopId} (allow create, update):
+    //    aggiungere la condizione campNotTouched(), così un operatore non può cambiare i campi di campagna.
+    //    Esempio:
+    //      allow create, update: if (approved() || isAdmin())
+    //        && request.resource.data.modificato_uid == request.auth.uid
+    //        && (isAdmin() || campNotTouched());
+    function campNotTouched() {
+      return resource == null
+        ? !request.resource.data.keys().hasAny(campKeys())
+        : !request.resource.data.diff(resource.data).affectedKeys().hasAny(campKeys());
+    }
+    function campKeys() {
+      return ['camp_wa_status','camp_wa_status_at','camp_wa_status_detail',
+              'camp_last_reply_at','camp_last_reply_channel','camp_last_reply_class','camp_last_reply_text',
+              'camp_wa_opt_out','camp_wa_opt_out_at','camp_wa_opt_out_reason',
+              'camp_email_opt_out','camp_email_opt_out_at','camp_email_opt_out_reason','camp_email_bounced',
+              'camp_non_settore','camp_stato','camp_whatsapp_probabile','camp_wa_duplicate_of',
+              'camp_facebook','camp_instagram','camp_altri_contatti','camp_legacy_ids',
+              'camp_queue_priority','camp_last_sync_at'];
+    }
+
+    // 2) Collezioni di Campagne: lettura solo admin, scrittura solo server (Admin SDK).
+    match /camp_campaigns/{id}      { allow read: if isAdmin(); allow write: if false; }
+    match /camp_queue/{id}          { allow read: if isAdmin(); allow write: if false; }
+    match /camp_wa_events/{id}      { allow read: if isAdmin(); allow write: if false; }
+    match /camp_email_events/{id}   { allow read: if isAdmin(); allow write: if false; }
+    match /camp_messages/{id}       { allow read: if isAdmin(); allow write: if false; }
+    match /camp_manual_sends/{id}   { allow read: if isAdmin(); allow write: if false; }
+    match /camp_settings/{id}       { allow read: if isAdmin(); allow write: if false; }
+    match /camp_meta/{id}           { allow read: if isAdmin(); allow write: if false; }
+    match /wa_send_guard/{id}       { allow read: if isAdmin(); allow write: if false; }
+    // indici: servono al server e al tasto SYNC (che chiama il server); nessun client li scrive
+    match /phone_index/{id}         { allow read: if isAdmin(); allow write: if false; }
+    match /email_index/{id}         { allow read: if isAdmin(); allow write: if false; }
+    // token di disiscrizione: mai leggibili da client (la pagina di disiscrizione passa dal server)
+    match /camp_unsub_tokens/{id}   { allow read, write: if false; }
+    // ================= fine sezione Natom Campagne =================
 
     match /{document=**} { allow read, write: if false; }
   }
