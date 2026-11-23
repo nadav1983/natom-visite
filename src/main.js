@@ -658,10 +658,16 @@ function viewLegenda() {
 // ---------------- Attività venditori (admin + utenti con canViewActivity dati dall admin) ----------------
 // Negozi aggiunti/modificati per utente. Candidati = negozi con updatedAt nel periodo (cache locale, già aggiornata
 // in tempo reale da watchChanges/onSnapshot); per ognuno si legge solo lo storico del periodo (poche letture).
-const ACT = { period: 'oggi', who: '', cache: new Map(), seq: 0 };
-const ACT_MAX = 250, ACT_MAX_LONG = 5000; // periodi lunghi: tutti i negozi toccati (1 lettura minima per negozio, poi in memoria)
-const LONG = p => p === '30g' || p === 'sempre';
-const actMax = p => (LONG(p) ? ACT_MAX_LONG : ACT_MAX);
+const ACT = { period: 'oggi', who: '', cache: new Map(), seq: 0, sync: false };
+// Le scritture automatiche (SYNC Campagne, server) NON devono più "spingere fuori" le attività dei venditori:
+// niente tetto sui negozi candidati (prima: i 5000 più recenti per updatedAt). Si leggono gli storici solo dei
+// negozi cambiati dopo l'ultima lettura (cache locale), prima quelli modificati per ultimi da un operatore.
+// Le voci di sistema sono nascoste di default (chip "Mostra SYNC").
+const ACT_MAX_ALL = 50000; // solo protezione: in pratica tutti i negozi toccati
+const actMax = () => ACT_MAX_ALL;
+const SYS_UIDS = new Set(['natom-campagne-server']);
+const isSys = x => SYS_UIDS.has(x?.uid) || /^SYNC\b/i.test(String(x?.nome || ''));
+const sysRow = r => /^SYNC\b/i.test(String(r?.modificato_da || ''));
 const MULTI = p => p !== 'oggi' && p !== 'ieri';
 const dayKey = ms => { const d = new Date(ms); d.setHours(0, 0, 0, 0); return d.getTime(); };
 const dayLabel = ms => new Date(ms).toLocaleDateString('it-IT', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' });
@@ -696,7 +702,8 @@ function viewActivity() {
   app.innerHTML = `<div class="chips" id="actPer">${[['oggi', 'Oggi'], ['ieri', 'Ieri'], ['7g', 'Ultimi 7 giorni'], ['30g', 'Ultimi 30 giorni'], ['sempre', 'Da sempre']].map(([v, l]) => `<button type="button" class="chip ${ACT.period === v ? 'on' : ''}" data-p="${v}">${l}</button>`).join('')}</div>
    <button class="btn light" id="actRefresh" style="margin-top:8px">🔄 Aggiorna</button><div class="chips" id="actWho" style="margin-top:8px"></div><div id="actSum" class="muted" style="margin:10px 2px"></div><div id="actList"><div class="loading">Carico le attività…</div></div>`;
   $('#actPer').onclick = e => { const b = e.target.closest('[data-p]'); if (!b) return; ACT.period = b.dataset.p; ACT.who = ''; $('#actPer').querySelectorAll('.chip').forEach(x => x.classList.toggle('on', x === b)); drawActivity(); };
-  $('#actWho').onclick = e => { const b = e.target.closest('[data-w]'); if (!b) return; ACT.who = b.dataset.w; drawActivity(true); };
+  $('#actWho').onclick = e => { const sb = e.target.closest('[data-sync]'); if (sb) { ACT.sync = !ACT.sync; ACT.who = ''; drawActivity(true); return; }
+    const b = e.target.closest('[data-w]'); if (!b) return; ACT.who = b.dataset.w; drawActivity(true); };
   $('#actRefresh').onclick = async e => { const b = e.target; b.disabled = true; b.textContent = '🔄 Aggiorno…';
     try { await forceRefresh(); } catch (er) { toast(errIt(er), 5000); }
     if (b.isConnected) { b.disabled = false; b.textContent = '🔄 Aggiorna'; } ACT.entries = null; drawActivity(); };
@@ -714,7 +721,8 @@ async function drawActivity(onlyFilter) {
       // cache locale dello storico per negozio: si rilegge dal server SOLO se il negozio è cambiato dopo l'ultima lettura
       if (!ACT.hc) { let c = null; try { c = await L.getMeta('acthist'); } catch {} ACT.hc = new Map(Object.entries(c || {})); }
       // candidati: solo negozi davvero toccati dall'app (data > 0 e "ultima modifica"/"modificato da"), non i 13.000 del database iniziale
-      const cand = [...S.rows.values()].filter(r => rowTime(r) > 0 && rowTime(r) >= from && (r.ultima_modifica || r.modificato_da)).sort((a, b) => rowTime(b) - rowTime(a));
+      const cand = [...S.rows.values()].filter(r => rowTime(r) > 0 && rowTime(r) >= from && (r.ultima_modifica || r.modificato_da))
+        .sort((a, b) => (sysRow(a) - sysRow(b)) || (rowTime(b) - rowTime(a))); // prima i negozi toccati per ultimi da un operatore
       const take = cand.slice(0, actMax(p));
       const need = take.filter(r => { const c = ACT.hc.get(r._id); return !c || c.t < rowTime(r); });
       let i = 0, done = 0, failed = 0, lastP = 0;
@@ -726,18 +734,18 @@ async function drawActivity(onlyFilter) {
           try { const h = await withTimeout(C.getHistoryAll(r._id), 15000); ACT.hc.set(r._id, { t: rowTime(r), h }); }
           catch (e) { failed++; console.warn('history', r._id, e.code || e.message); if (e.code === 'permission-denied' || e.code === 'resource-exhausted') throw e; }
           done++; prog(); } };
-        await Promise.all(Array.from({ length: 8 }, worker));
+        await Promise.all(Array.from({ length: 16 }, worker));
         if (need.length) { try { await L.setMeta('acthist', Object.fromEntries(ACT.hc)); } catch (e) { console.warn('acthist', e); } }
       }
       const map = new Map(); let imported = 0;
       for (const r of take) {
         const c = ACT.hc.get(r._id);
-        if (!c) { const k = (r.modificato_da || '?') + '|' + r._id; map.set(k, { id: r._id, uid: '', nome: r.modificato_da || '?', at: rowTime(r), nuovo: false, mods: {}, n: 1, noDetail: true }); continue; }
+        if (!c) { const k = (r.modificato_da || '?') + '|' + r._id; map.set(k, { id: r._id, uid: '', nome: r.modificato_da || '?', at: rowTime(r), nuovo: false, mods: {}, n: 1, noDetail: true, sys: sysRow(r) }); continue; }
         const hs = c.h.filter(x => x.atMs >= from && x.atMs < to);
         if (!hs.length) { if (!c.h.length && rowTime(r) < to) imported++; continue; }
         for (const x of [...hs].reverse()) {
           const k = (x.uid || x.nome) + '|' + r._id + (MULTI(p) ? '|' + dayKey(x.atMs) : ''); let e = map.get(k);
-          if (!e) map.set(k, e = { id: r._id, uid: x.uid || '', nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0 });
+          if (!e) map.set(k, e = { id: r._id, uid: x.uid || '', nome: x.nome || '?', at: 0, nuovo: false, mods: {}, n: 0, sys: isSys(x) });
           e.at = Math.max(e.at, x.atMs); e.n++; if (x.nuovo) e.nuovo = true;
           for (const [f, v] of Object.entries(x.modifiche || {})) e.mods[f] = e.mods[f] ? { da: e.mods[f].da, a: v.a } : { ...v };
         }
@@ -756,11 +764,13 @@ async function drawActivity(onlyFilter) {
     if (ACT.again || location.hash !== '#/attivita' || !$('#actList')) return;
   }
   const ok = S.profile.ruolo === 'admin' ? null : new Set(S.profile.canViewActivityOf || []);
-  const all = ok ? ACT.entries.filter(e => !e.noDetail && ok.has(e.uid)) : ACT.entries, users = new Map();
+  const vis = ACT.entries.filter(e => ACT.sync || !e.sys), nSys = ACT.entries.length - ACT.entries.filter(e => !e.sys).length;
+  const all = ok ? vis.filter(e => !e.noDetail && ok.has(e.uid)) : vis, users = new Map();
   for (const e of all) users.set(e.nome, (users.get(e.nome) || 0) + 1);
   if (ACT.who && !users.has(ACT.who)) ACT.who = '';
   $('#actWho').innerHTML = `<button type="button" class="chip ${!ACT.who ? 'on' : ''}" data-w="">Tutti (${all.length})</button>` +
-    [...users.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => `<button type="button" class="chip ${ACT.who === n ? 'on' : ''}" data-w="${esc(n)}">${esc(n)} (${c})</button>`).join('');
+    [...users.entries()].sort((a, b) => b[1] - a[1]).map(([n, c]) => `<button type="button" class="chip ${ACT.who === n ? 'on' : ''}" data-w="${esc(n)}">${esc(n)} (${c})</button>`).join('') +
+    (ok ? '' : `<button type="button" class="chip ${ACT.sync ? 'on' : ''}" data-sync="1" title="Modifiche automatiche di sistema (SYNC Campagne)">⚙️ Mostra SYNC${nSys ? ` (${nSys})` : ''}</button>`);
   const list = ACT.who ? all.filter(e => e.nome === ACT.who) : all;
   const nNew = list.filter(e => e.nuovo).length, x = ACT.extra;
   $('#actSum').innerHTML = `<b>${new Set(list.map(e => e.id)).size}</b> negozi · ${nNew} nuovi · ${list.length - nNew} modificati${MULTI(p) ? (n => ` · ${n} ${n === 1 ? 'giorno' : 'giorni'}`)(new Set(list.map(e => dayKey(e.at))).size) : ''}` +
